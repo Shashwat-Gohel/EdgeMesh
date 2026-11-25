@@ -58,6 +58,7 @@ app.get('/cdn/fetch', async (req, res) => {
   const fileId = req.query.fileId as string;
   const latStr = req.query.lat as string;
   const lngStr = req.query.lng as string;
+  const preferredNodeId = (req.query.node as string) || undefined;
 
   if (!fileId || !latStr || !lngStr) {
     return res.status(400).json({ error: 'Query parameters fileId, lat, and lng are required' });
@@ -66,14 +67,16 @@ app.get('/cdn/fetch', async (req, res) => {
   const clientLat = parseFloat(latStr);
   const clientLng = parseFloat(lngStr);
 
-  logger.info({ requestId, fileId, clientLat, clientLng }, 'Gateway received file download request');
+  logger.info({ requestId, fileId, clientLat, clientLng, preferredNodeId }, 'Gateway received file download request');
 
   // STEP 1: Ingress Log
   await emitStepLog(
     requestId,
     1,
     'Client Request Ingress',
-    `Gateway received request for file '${fileId}' from coordinates (${clientLat.toFixed(4)}, ${clientLng.toFixed(4)}).`,
+    `Gateway received request for file '${fileId}' from coordinates (${clientLat.toFixed(4)}, ${clientLng.toFixed(4)})${
+      preferredNodeId ? ` with manual override to node '${preferredNodeId}'` : ''
+    }.`,
     'info'
   );
 
@@ -83,17 +86,39 @@ app.get('/cdn/fetch', async (req, res) => {
       requestId,
       2,
       'Forward to Routing Engine',
-      `Querying Routing Engine at ${ROUTING_ENGINE_URL} to select nearest healthy Edge Node...`,
+      preferredNodeId
+        ? `Querying Routing Engine at ${ROUTING_ENGINE_URL} to route directly to manually selected Node '${preferredNodeId}' (scoring skipped)...`
+        : `Querying Routing Engine at ${ROUTING_ENGINE_URL} to select nearest healthy Edge Node...`,
       'info'
     );
 
-    const routingRes = await axios.post<RoutingResponse>(
-      `${ROUTING_ENGINE_URL}/api/route`,
-      { clientLat, clientLng, fileId },
-      { headers: { 'x-request-id': requestId }, timeout: 4000 }
-    );
+    let routingRes;
+    try {
+      routingRes = await axios.post<RoutingResponse>(
+        `${ROUTING_ENGINE_URL}/api/route`,
+        { clientLat, clientLng, fileId, preferredNodeId },
+        { headers: { 'x-request-id': requestId }, timeout: 4000 }
+      );
+    } catch (routingErr) {
+      // Manual-override lookups (and other routing-engine 4xx failures) must propagate
+      // as-is instead of being caught by the generic 500 handler below, so the client
+      // sees the real reason (e.g. requested node unavailable) with no silent fallback.
+      if (axios.isAxiosError(routingErr) && routingErr.response) {
+        const status = routingErr.response.status;
+        const errorBody = routingErr.response.data;
+        await emitStepLog(
+          requestId,
+          2,
+          'Routing Decision Rejected',
+          `Routing Engine rejected the request: ${JSON.stringify(errorBody)}`,
+          'error'
+        );
+        return res.status(status).json(errorBody);
+      }
+      throw routingErr;
+    }
 
-    const { selectedNode, distanceKm } = routingRes.data;
+    const { selectedNode, distanceKm, routingMode } = routingRes.data;
 
     // STEP 3: Proxy Request to Target Edge Node
     const targetUrl = `${selectedNode.baseUrl}/files/${fileId}`;
@@ -113,7 +138,7 @@ app.get('/cdn/fetch', async (req, res) => {
       requestId,
       7,
       'Response Egress to Client',
-      `Serving file '${fileId}' to client from Node '${selectedNode.name}' (${distanceKm}km). Status: ${cacheStatus} | Total Latency: ${totalLatencyMs}ms.`,
+      `Serving file '${fileId}' to client from Node '${selectedNode.name}' (${distanceKm}km, ${routingMode === 'manual' ? 'manual override' : 'auto-routed'}). Status: ${cacheStatus} | Total Latency: ${totalLatencyMs}ms.`,
       'success'
     );
 
@@ -126,6 +151,7 @@ app.get('/cdn/fetch', async (req, res) => {
     res.setHeader('X-Selected-Node-Name', selectedNode.name);
     res.setHeader('X-Distance-Km', distanceKm.toString());
     res.setHeader('X-Total-Latency-Ms', totalLatencyMs.toString());
+    res.setHeader('X-Routing-Mode', routingMode);
     res.setHeader('X-Request-ID', requestId);
 
     return res.send(Buffer.from(edgeNodeRes.data));

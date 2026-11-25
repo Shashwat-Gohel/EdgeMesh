@@ -55,17 +55,21 @@ export interface RoutingRequest {
   clientLat: number;
   clientLng: number;
   fileId: string;
+  preferredNodeId?: string;
 }
+
+export type RoutingMode = 'auto' | 'manual';
 
 export interface RoutingResponse {
   selectedNode: EdgeNodeConfig;
   distanceKm: number;
   routingTimeMs: number;
+  routingMode: RoutingMode;
   candidateScores: Array<{
     nodeId: string;
     distanceKm: number;
     loadPercentage: number;
-    score: number;
+    score: number | null;
   }>;
 }
 

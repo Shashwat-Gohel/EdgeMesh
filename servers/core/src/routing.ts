@@ -54,14 +54,14 @@ export function createRoutingRouter(registryUrl: string) {
 
   app.post('/api/route', async (req, res) => {
     const startTime = Date.now();
-    const { clientLat, clientLng, fileId } = req.body as RoutingRequest;
+    const { clientLat, clientLng, fileId, preferredNodeId } = req.body as RoutingRequest;
     const requestId = (req.headers['x-request-id'] as string) || undefined;
 
     if (typeof clientLat !== 'number' || typeof clientLng !== 'number') {
       return res.status(400).json({ error: 'Valid clientLat and clientLng coordinates required' });
     }
 
-    logger.info({ clientLat, clientLng, fileId, requestId }, 'Received routing calculation request');
+    logger.info({ clientLat, clientLng, fileId, preferredNodeId, requestId }, 'Received routing calculation request');
 
     try {
       const registryRes = await axios.get(`${registryUrl}/api/nodes/healthy`, { timeout: 3000 });
@@ -70,6 +70,51 @@ export function createRoutingRouter(registryUrl: string) {
       if (healthyNodes.length === 0) {
         await emitStepLog(registryUrl, requestId, 3, 'Routing Failed', 'No healthy Edge Nodes available!', 'error');
         return res.status(503).json({ error: 'No healthy Edge Nodes available in network' });
+      }
+
+      // Manual override: skip scoring entirely and route only to the requested node
+      if (preferredNodeId) {
+        const manualMatch = healthyNodes.find(({ config }) => config.id === preferredNodeId);
+
+        if (!manualMatch) {
+          await emitStepLog(
+            registryUrl, requestId, 3, 'Manual Routing Failed',
+            `Requested Edge Node '${preferredNodeId}' is not registered or not healthy.`,
+            'error'
+          );
+          return res.status(404).json({ error: `Edge Node '${preferredNodeId}' is not registered or not currently healthy` });
+        }
+
+        const distanceKm = calculateHaversineDistance(clientLat, clientLng, manualMatch.config.lat, manualMatch.config.lng);
+        const routingTimeMs = Date.now() - startTime;
+
+        logger.info(
+          { selectedNodeId: manualMatch.config.id, distanceKm, routingTimeMs },
+          '[ROUTING] Manual Edge Node override applied'
+        );
+
+        await emitStepLog(
+          registryUrl, requestId, 3, 'Manual Route Override',
+          `Client manually selected '${manualMatch.config.name}' (${distanceKm}km). Load-based scoring skipped.`,
+          'success'
+        );
+
+        const manualResponse: RoutingResponse = {
+          selectedNode: manualMatch.config,
+          distanceKm,
+          routingTimeMs,
+          routingMode: 'manual',
+          candidateScores: [
+            {
+              nodeId: manualMatch.config.id,
+              distanceKm,
+              loadPercentage: manualMatch.heartbeat.loadPercentage || 0,
+              score: null,
+            },
+          ],
+        };
+
+        return res.json(manualResponse);
       }
 
       const candidateScores = healthyNodes.map(({ config, heartbeat }) => {
@@ -105,6 +150,7 @@ export function createRoutingRouter(registryUrl: string) {
         selectedNode: winner.config,
         distanceKm: winner.distanceKm,
         routingTimeMs,
+        routingMode: 'auto',
         candidateScores: candidateScores.map((c) => ({
           nodeId: c.nodeId, distanceKm: c.distanceKm,
           loadPercentage: c.loadPercentage, score: c.score,

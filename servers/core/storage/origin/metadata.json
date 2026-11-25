@@ -1,12 +1,4 @@
 {
-  "b05a2a941d27ca19": {
-    "fileId": "b05a2a941d27ca19",
-    "originalName": "Apify prompt.txt",
-    "mimeType": "text/plain",
-    "sizeBytes": 1657,
-    "checksum": "dd2234ecc8d05a4f17729e5af092b042",
-    "createdAt": "2026-07-21T08:59:19.363Z"
-  },
   "28b3111aa8b05836": {
     "fileId": "28b3111aa8b05836",
     "originalName": "img 1.jpeg",
@@ -38,5 +30,13 @@
     "sizeBytes": 108166,
     "checksum": "cac763c3b7b57765de67cfcb21ccd315",
     "createdAt": "2026-07-31T12:10:27.977Z"
+  },
+  "0b0d4b4f4df33cec": {
+    "fileId": "0b0d4b4f4df33cec",
+    "originalName": "Gradesheet.pdf",
+    "mimeType": "application/pdf",
+    "sizeBytes": 51168,
+    "checksum": "0077041f979faf6f599794de6294252b",
+    "createdAt": "2026-08-19T12:10:34.371Z"
   }
 }

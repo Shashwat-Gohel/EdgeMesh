@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { MapPin, Download, FileText, CheckCircle2, Clock, Zap, ArrowRight, RefreshCcw } from 'lucide-react';
-import { FileMetadata } from '@edgemesh/shared-types';
+import { MapPin, Download, FileText, CheckCircle2, Clock, Zap, ArrowRight, RefreshCcw, Target } from 'lucide-react';
+import { EdgeNodeConfig, FileMetadata } from '@edgemesh/shared-types';
 
 const GATEWAY_URL = 'http://localhost:3000';
 const ORIGIN_URL = 'http://localhost:5000';
+const REGISTRY_URL = 'http://localhost:3002';
 
 interface PresetLocation {
   name: string;
@@ -40,12 +41,17 @@ export default function App() {
 
   const [selectedEdgeFn, setSelectedEdgeFn] = useState<'none' | 'inject-security-headers' | 'geo-personalization'>('none');
 
+  const [manualOverride, setManualOverride] = useState<boolean>(false);
+  const [availableNodes, setAvailableNodes] = useState<EdgeNodeConfig[]>([]);
+  const [preferredNodeId, setPreferredNodeId] = useState<string>('');
+
   const [metrics, setMetrics] = useState<{
     cacheStatus: string;
     selectedNodeId: string;
     selectedNodeName: string;
     distanceKm: string;
     totalLatencyMs: string;
+    routingMode: string;
     lambdaFnExecuted?: string;
     lambdaGreeting?: string;
     lambdaHeadersCount?: number;
@@ -63,7 +69,21 @@ export default function App() {
 
   useEffect(() => {
     fetchOriginFiles();
+    fetchAvailableNodes();
   }, []);
+
+  const fetchAvailableNodes = async () => {
+    try {
+      const res = await axios.get(`${REGISTRY_URL}/api/nodes/healthy`);
+      const nodes: EdgeNodeConfig[] = (res.data.nodes || []).map((n: { config: EdgeNodeConfig }) => n.config);
+      setAvailableNodes(nodes);
+      if (nodes.length > 0 && !preferredNodeId) {
+        setPreferredNodeId(nodes[0].id);
+      }
+    } catch {
+      setAvailableNodes([]);
+    }
+  };
 
   const fetchOriginFiles = async () => {
     try {
@@ -82,6 +102,7 @@ export default function App() {
 
   const handleFetch = async () => {
     if (!selectedFileId) return;
+    if (manualOverride && !preferredNodeId) return;
 
     setLoading(true);
     setMetrics(null);
@@ -92,9 +113,21 @@ export default function App() {
 
     // Reset timeline state
     setTimeline([
-      { step: 1, label: 'Client Request Ingress', detail: `Requesting file '${selectedFileId}' from coords (${clientLat.toFixed(2)}, ${clientLng.toFixed(2)})`, status: 'running' },
+      {
+        step: 1,
+        label: 'Client Request Ingress',
+        detail: manualOverride
+          ? `Requesting file '${selectedFileId}' with manual override to node '${preferredNodeId}'`
+          : `Requesting file '${selectedFileId}' from coords (${clientLat.toFixed(2)}, ${clientLng.toFixed(2)})`,
+        status: 'running',
+      },
       { step: 2, label: 'API Gateway Forwarding', detail: 'Gateway received request', status: 'pending' },
-      { step: 3, label: 'Routing Engine Decision', detail: 'Calculating Haversine distance across nodes...', status: 'pending' },
+      {
+        step: 3,
+        label: 'Routing Engine Decision',
+        detail: manualOverride ? `Skipping scoring — routing directly to '${preferredNodeId}'...` : 'Calculating Haversine distance across nodes...',
+        status: 'pending',
+      },
       { step: 4, label: 'Edge Node Redis L1 Check', detail: 'Checking fast in-memory Redis cache...', status: 'pending' },
       { step: 5, label: 'Edge Node Disk L2 Check', detail: 'Checking local node storage...', status: 'pending' },
       { step: 6, label: 'Origin L3 Fetch (If Miss)', detail: 'Fetching from master storage on miss...', status: 'pending' },
@@ -105,7 +138,13 @@ export default function App() {
 
     try {
       const response = await axios.get(`${GATEWAY_URL}/cdn/fetch`, {
-        params: { fileId: selectedFileId, lat: clientLat, lng: clientLng, edgeFn: selectedEdgeFn },
+        params: {
+          fileId: selectedFileId,
+          lat: clientLat,
+          lng: clientLng,
+          edgeFn: selectedEdgeFn,
+          ...(manualOverride ? { node: preferredNodeId } : {}),
+        },
         responseType: 'blob',
       });
 
@@ -114,6 +153,7 @@ export default function App() {
       const selectedNodeName = (response.headers['x-selected-node-name'] as string) || 'Edge Mumbai';
       const distanceKm = (response.headers['x-distance-km'] as string) || '12.4';
       const totalLatencyMs = (response.headers['x-total-latency-ms'] as string) || (Date.now() - startTime).toString();
+      const routingMode = (response.headers['x-routing-mode'] as string) || (manualOverride ? 'manual' : 'auto');
       const lambdaFnExecuted = response.headers['x-lambda-edge-executed'] as string | undefined;
       const lambdaGreeting = response.headers['x-lambda-edge-greeting'] as string | undefined;
 
@@ -129,6 +169,7 @@ export default function App() {
         selectedNodeName,
         distanceKm,
         totalLatencyMs,
+        routingMode,
         lambdaFnExecuted,
         lambdaGreeting,
       });
@@ -137,17 +178,42 @@ export default function App() {
       setTimeline([
         { step: 1, label: 'Client Request Ingress', detail: `Sent request from coordinates (${clientLat.toFixed(4)}, ${clientLng.toFixed(4)})`, status: 'completed' },
         { step: 2, label: 'API Gateway Forwarding', detail: `Forwarded via Gateway (${GATEWAY_URL})`, status: 'completed' },
-        { step: 3, label: 'Routing Engine Decision', detail: `Selected Node: ${selectedNodeName} (${distanceKm} km)`, status: 'completed' },
+        {
+          step: 3,
+          label: 'Routing Engine Decision',
+          detail:
+            routingMode === 'manual'
+              ? `🎯 Manual override → ${selectedNodeName} (scoring skipped, ${distanceKm} km)`
+              : `Selected Node: ${selectedNodeName} (${distanceKm} km)`,
+          status: 'completed',
+        },
         { step: 4, label: 'Lambda@Edge Function', detail: lambdaFnExecuted ? `⚡ Executed '${lambdaFnExecuted}' at Edge` : 'Bypassed (No edge function selected)', status: 'completed' },
         { step: 5, label: 'Edge Node Cache Check', detail: cacheStatus.startsWith('HIT') ? `🎯 CACHE HIT (${cacheStatus})` : 'Cache MISS', status: 'completed' },
         { step: 6, label: 'Origin L3 Fetch (If Miss)', detail: cacheStatus.startsWith('MISS') ? '☁️ Fetched from Origin Master Storage' : 'Bypassed (Served from Edge)', status: 'completed' },
         { step: 7, label: 'Egress Delivery to Client', detail: `Completed in ${totalLatencyMs}ms. Status: ${cacheStatus}`, status: 'completed' },
       ]);
     } catch (err) {
+      const axiosErr = err as import('axios').AxiosError<Blob>;
+      // responseType is 'blob', so an error body also arrives as a Blob and must be re-parsed as JSON.
+      let serverMessage: string | undefined;
+      if (axiosErr.response?.data instanceof Blob) {
+        try {
+          const text = await axiosErr.response.data.text();
+          serverMessage = JSON.parse(text)?.error;
+        } catch {
+          // Non-JSON error body; ignore and fall through to axiosErr.message
+        }
+      }
+      const errorMessage = serverMessage || axiosErr.message;
+
       setTimeline((prev) =>
-        prev.map((item) => ({ ...item, status: 'completed', detail: item.step === 7 ? `Error: ${(err as Error).message}` : item.detail }))
+        prev.map((item) => ({ ...item, status: 'completed', detail: item.step === 7 ? `Error: ${errorMessage}` : item.detail }))
       );
-      alert('Request failed: ' + (err as Error).message);
+      alert(
+        manualOverride && serverMessage
+          ? `Manual routing failed: ${errorMessage}`
+          : 'Request failed: ' + errorMessage
+      );
     } finally {
       setLoading(false);
     }
@@ -226,6 +292,45 @@ export default function App() {
                 />
               </div>
             </div>
+
+            {/* Manual Edge Node Override */}
+            <div className="mt-4 pt-4 border-t border-zinc-800">
+              <button
+                onClick={() => setManualOverride((v) => !v)}
+                className={`w-full flex items-center justify-between p-2 border text-[10px] uppercase font-bold tracking-wider transition ${
+                  manualOverride ? 'border-amber-400 bg-amber-950/30 text-amber-300' : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <Target className="w-3.5 h-3.5" />
+                  Manual Node Override
+                </span>
+                <span>{manualOverride ? 'ON — Scoring Bypassed' : 'OFF'}</span>
+              </button>
+
+              {manualOverride && (
+                <div className="mt-3">
+                  <label className="block text-[10px] text-zinc-500 uppercase mb-1">
+                    Force Request To Node
+                  </label>
+                  <select
+                    value={preferredNodeId}
+                    onChange={(e) => setPreferredNodeId(e.target.value)}
+                    className="w-full bg-zinc-950 border border-amber-900/50 px-3 py-2 text-xs text-amber-300 font-mono focus:border-amber-400 focus:outline-none"
+                  >
+                    {availableNodes.length === 0 && <option value="">No healthy nodes registered</option>}
+                    {availableNodes.map((n) => (
+                      <option key={n.id} value={n.id}>
+                        {n.name} ({n.id}) — {n.region}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-zinc-600 mt-1">
+                    Your coordinates above are still sent with the request (for distance/latency measurement), but node selection is forced — the request is sent to this node only, skipping Haversine/load scoring.
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* File Picker & Execute Button */}
@@ -293,6 +398,18 @@ export default function App() {
               </h2>
 
               <div className="space-y-3 text-xs">
+                <div className="flex justify-between border-b border-zinc-900 pb-1">
+                  <span className="text-zinc-500">Routing Mode</span>
+                  {metrics.routingMode === 'manual' ? (
+                    <span className="px-2 py-0.5 bg-amber-950/30 border border-amber-400 text-amber-300 font-bold text-[10px] uppercase">
+                      Manual Override
+                    </span>
+                  ) : (
+                    <span className="px-2 py-0.5 border border-zinc-700 text-zinc-300 font-bold text-[10px] uppercase">
+                      Auto (Haversine + Load)
+                    </span>
+                  )}
+                </div>
                 <div className="flex justify-between border-b border-zinc-900 pb-1">
                   <span className="text-zinc-500">Target Node</span>
                   <span className="text-white font-bold">{metrics.selectedNodeName} ({metrics.selectedNodeId})</span>

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
-import { Server, HardDrive, Cpu, Database, Activity, Upload, Terminal, RefreshCw, Layers, Cloud, Zap, Shield, Globe } from 'lucide-react';
+import { Server, HardDrive, Cpu, Database, Activity, Upload, Terminal, RefreshCw, Layers, Cloud, Zap, Shield, Globe, Trash2 } from 'lucide-react';
 import { NodeHeartbeat, StepLogEvent, FileMetadata } from '@edgemesh/shared-types';
 
 const REGISTRY_URL = 'http://localhost:3002';
@@ -12,6 +12,7 @@ export default function App() {
   const [logs, setLogs] = useState<StepLogEvent[]>([]);
   const [originFiles, setOriginFiles] = useState<FileMetadata[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [redisKeys, setRedisKeys] = useState<Record<string, Array<{ key: string; ttl: number; type: string }>>>({});
   
@@ -154,6 +155,27 @@ export default function App() {
       alert('Upload failed: ' + (err as Error).message);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleDeleteOriginFile = async (fileId: string, fileName: string) => {
+    if (!window.confirm(`Delete "${fileName}" from Origin Server? This cannot be undone.`)) return;
+    setDeletingFileId(fileId);
+    try {
+      await axios.delete(`${ORIGIN_URL}/api/files/${fileId}`);
+      await fetchOriginFiles();
+      addLog({
+        id: 'del_' + Date.now(),
+        timestamp: Date.now(),
+        service: 'ORIGIN',
+        title: 'Master File Deleted',
+        details: `Deleted '${fileName}' (ID: ${fileId}) from Origin Server master storage`,
+        level: 'warn',
+      });
+    } catch (err) {
+      alert('Delete failed: ' + (err as Error).message);
+    } finally {
+      setDeletingFileId(null);
     }
   };
 
@@ -467,7 +489,19 @@ export default function App() {
                     <span className="text-white font-bold block">{f.originalName}</span>
                     <span className="text-[10px] text-zinc-500">ID: {f.fileId}</span>
                   </div>
-                  <span className="text-[11px] text-zinc-400 font-mono">{formatBytes(f.sizeBytes)}</span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-[11px] text-zinc-400 font-mono">{formatBytes(f.sizeBytes)}</span>
+                    <button
+                      onClick={() => handleDeleteOriginFile(f.fileId, f.originalName)}
+                      disabled={deletingFileId === f.fileId}
+                      title={`Delete ${f.originalName}`}
+                      className="p-1 border border-red-900/60 text-red-600 hover:bg-red-600 hover:text-white hover:border-red-500 transition disabled:opacity-30"
+                    >
+                      {deletingFileId === f.fileId
+                        ? <span className="text-[9px] px-0.5">...</span>
+                        : <Trash2 className="w-3 h-3" />}
+                    </button>
+                  </div>
                 </div>
               ))
             )}

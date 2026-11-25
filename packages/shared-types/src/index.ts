@@ -63,7 +63,13 @@ export interface RoutingRequest {
   clientLat: number;
   clientLng: number;
   fileId: string;
+  preferredNodeId?: string;
 }
+
+/**
+ * How a RoutingResponse's selectedNode was determined
+ */
+export type RoutingMode = 'auto' | 'manual';
 
 /**
  * Routing Engine decision result
@@ -72,11 +78,12 @@ export interface RoutingResponse {
   selectedNode: EdgeNodeConfig;
   distanceKm: number;
   routingTimeMs: number;
+  routingMode: RoutingMode;
   candidateScores: Array<{
     nodeId: string;
     distanceKm: number;
     loadPercentage: number;
-    score: number;
+    score: number | null;
   }>;
 }
 

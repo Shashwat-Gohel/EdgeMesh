@@ -40,7 +40,7 @@ export function createGatewayRouter(routingEngineUrl: string, originUrl: string,
     origin: '*',
     exposedHeaders: [
       'X-Cache', 'X-Selected-Node-ID', 'X-Selected-Node-Name',
-      'X-Distance-Km', 'X-Total-Latency-Ms', 'X-Request-ID'
+      'X-Distance-Km', 'X-Total-Latency-Ms', 'X-Routing-Mode', 'X-Request-ID'
     ]
   }));
   app.use(express.json());
@@ -66,6 +66,7 @@ export function createGatewayRouter(routingEngineUrl: string, originUrl: string,
     const fileId = req.query.fileId as string;
     const latStr = req.query.lat as string;
     const lngStr = req.query.lng as string;
+    const preferredNodeId = (req.query.node as string) || undefined;
 
     if (!fileId || !latStr || !lngStr) {
       return res.status(400).json({ error: 'Query parameters fileId, lat, and lng are required' });
@@ -74,13 +75,15 @@ export function createGatewayRouter(routingEngineUrl: string, originUrl: string,
     const clientLat = parseFloat(latStr);
     const clientLng = parseFloat(lngStr);
 
-    logger.info({ requestId, fileId, clientLat, clientLng }, 'Gateway received file download request');
+    logger.info({ requestId, fileId, clientLat, clientLng, preferredNodeId }, 'Gateway received file download request');
 
     // STEP 1: Ingress Log
     await emitStepLog(
       registryUrl, requestId, 1,
       'Client Request Ingress',
-      `Gateway received request for file '${fileId}' from coordinates (${clientLat.toFixed(4)}, ${clientLng.toFixed(4)}).`,
+      `Gateway received request for file '${fileId}' from coordinates (${clientLat.toFixed(4)}, ${clientLng.toFixed(4)})${
+        preferredNodeId ? ` with manual override to node '${preferredNodeId}'` : ''
+      }.`,
       'info'
     );
 
@@ -89,17 +92,35 @@ export function createGatewayRouter(routingEngineUrl: string, originUrl: string,
       await emitStepLog(
         registryUrl, requestId, 2,
         'Forward to Routing Engine',
-        `Querying Routing Engine at ${routingEngineUrl} to select nearest healthy Edge Node...`,
+        preferredNodeId
+          ? `Querying Routing Engine at ${routingEngineUrl} to route directly to manually selected Node '${preferredNodeId}' (scoring skipped)...`
+          : `Querying Routing Engine at ${routingEngineUrl} to select nearest healthy Edge Node...`,
         'info'
       );
 
-      const routingRes = await axios.post<RoutingResponse>(
-        `${routingEngineUrl}/api/route`,
-        { clientLat, clientLng, fileId },
-        { headers: { 'x-request-id': requestId }, timeout: 4000 }
-      );
+      let routingRes;
+      try {
+        routingRes = await axios.post<RoutingResponse>(
+          `${routingEngineUrl}/api/route`,
+          { clientLat, clientLng, fileId, preferredNodeId },
+          { headers: { 'x-request-id': requestId }, timeout: 4000 }
+        );
+      } catch (routingErr) {
+        if (axios.isAxiosError(routingErr) && routingErr.response) {
+          const status = routingErr.response.status;
+          const errorBody = routingErr.response.data;
+          await emitStepLog(
+            registryUrl, requestId, 2,
+            'Routing Decision Rejected',
+            `Routing Engine rejected the request: ${JSON.stringify(errorBody)}`,
+            'error'
+          );
+          return res.status(status).json(errorBody);
+        }
+        throw routingErr;
+      }
 
-      const { selectedNode, distanceKm } = routingRes.data;
+      const { selectedNode, distanceKm, routingMode } = routingRes.data;
 
       // STEP 3: Proxy request to the nearest Edge Node (server-side, no CORS issue)
       const targetUrl = `${selectedNode.baseUrl}/files/${fileId}`;
@@ -125,7 +146,7 @@ export function createGatewayRouter(routingEngineUrl: string, originUrl: string,
       await emitStepLog(
         registryUrl, requestId, 7,
         'Response Egress to Client',
-        `Serving file '${fileId}' from '${selectedNode.name}' (${distanceKm}km). Cache: ${cacheStatus} | Latency: ${totalLatencyMs}ms.`,
+        `Serving file '${fileId}' from '${selectedNode.name}' (${distanceKm}km, ${routingMode === 'manual' ? 'manual override' : 'auto-routed'}). Cache: ${cacheStatus} | Latency: ${totalLatencyMs}ms.`,
         'success'
       );
 
@@ -138,6 +159,7 @@ export function createGatewayRouter(routingEngineUrl: string, originUrl: string,
       res.setHeader('X-Selected-Node-Name', selectedNode.name);
       res.setHeader('X-Distance-Km', distanceKm.toString());
       res.setHeader('X-Total-Latency-Ms', totalLatencyMs.toString());
+      res.setHeader('X-Routing-Mode', routingMode);
       res.setHeader('X-Request-ID', requestId);
 
       return res.send(Buffer.from(edgeRes.data));
